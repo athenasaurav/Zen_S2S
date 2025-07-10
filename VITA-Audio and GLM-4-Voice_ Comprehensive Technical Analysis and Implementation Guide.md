@@ -1,6 +1,6 @@
 # VITA-Audio and GLM-4-Voice: Comprehensive Technical Analysis and Implementation Guide
 
-**Author:** Manus AI  
+**Author:** athensaurav
 **Date:** January 2025  
 **Version:** 1.0
 
