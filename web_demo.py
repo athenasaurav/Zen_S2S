@@ -75,7 +75,7 @@ def _launch_demo(model, tokenizer, audio_tokenizer):
                     "role": "system",
                     # "content": "Your Name: Luke\nYour Gender: male\n\nRespond in a text-audio interleaved manner.",
                     # "content": "Your Name: Lucy\nYour Gender: female\nRespond in a text-audio interleaved manner.",
-                    "content": "Your Name: Omni\nYour Gender: female\nRespond in a text-audio interleaved manner.",
+                    "content": "Your Name: Zen\nYour Gender: female\nRespond in a text-audio interleaved manner.",
                 },
             ]
             for i, (q, a) in enumerate(task_history):
@@ -258,9 +258,9 @@ def _launch_demo(model, tokenizer, audio_tokenizer):
         query = gr.Textbox(lines=2, label="Text Input")
         task_history = gr.State([])
         with gr.Row():
-            add_text_button = gr.Button("Submit Text (提交文本)")
-            add_audio_button = gr.Button("Submit Audio (提交音频)")
-            empty_bin = gr.Button("🧹 Clear History (清除历史)")
+            add_text_button = gr.Button("Submit Text")
+            add_audio_button = gr.Button("Submit Audio")
+            empty_bin = gr.Button("🧹 Clear History ")
             task = gr.Radio(choices=["ASR", "TTS", "Spoken QA"], label="TASK", value="Spoken QA")
 
         with gr.Row(scale=1):
@@ -268,7 +268,7 @@ def _launch_demo(model, tokenizer, audio_tokenizer):
             record_btn = gr.Audio(
                 sources=["microphone", "upload"],
                 type="filepath",
-                label="🎤 Record or Upload Audio (录音或上传音频)",
+                label="🎤 Record or Upload Audio",
                 show_download_button=True,
                 waveform_options=gr.WaveformOptions(sample_rate=16000),
             )
