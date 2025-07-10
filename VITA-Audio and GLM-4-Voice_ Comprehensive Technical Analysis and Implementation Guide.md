@@ -14,7 +14,7 @@ Key findings include the system's ability to achieve 3-5x speedup compared to ba
 
 ## Table of Contents
 
-1. [Introduction and Background](#introduction)
+1. [Introduction and Background](https://github.com/athenasaurav/zen-vita-audio/blob/main/VITA-Audio%20and%20GLM-4-Voice_%20Comprehensive%20Technical%20Analysis%20and%20Implementation%20Guide.md#1-introduction-and-background-introduction)
 2. [System Architecture Overview](#architecture)
 3. [GLM-4-Voice Component Analysis](#components)
 4. [Training Pipeline and Methodology](#training)
