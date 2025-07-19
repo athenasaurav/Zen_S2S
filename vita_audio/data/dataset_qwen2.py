@@ -32,8 +32,9 @@ class Qwen2Dataset(BaseDataset):
             **kwargs,
         )
 
+        # MODIFIED: Set proper default system message for system prompt handling
         self.default_system_message = "You are a helpful AI assistant."
-        self.default_system_message = None
+        # Original line commented out: self.default_system_message = None
 
         self.ret = defaultdict(dict)
         self.is_cat = True
@@ -250,6 +251,7 @@ class Qwen2Dataset(BaseDataset):
                     f"processed_samples {self.processed_samples} skip_samples {self.skip_samples}"
                 )
             return True
+        return False
 
     def show_statistic(self):
         log_interval = 10000
@@ -296,11 +298,17 @@ class Qwen2Dataset(BaseDataset):
 
                 is_begin = is_empty or self.reset_position_ids or self.reset_attention_mask
 
+                # MODIFIED: Extract system prompt from data sample
+                if "system_prompt" in sample and sample["system_prompt"]:
+                    current_system_message = sample["system_prompt"]
+                else:
+                    current_system_message = self.default_system_message
+
                 ret = preprocess(
                     sample,
                     self.tokenizer,
                     self.image_token_length,
-                    default_system_message=self.default_system_message,
+                    default_system_message=current_system_message,  # Use extracted system prompt
                     processor=self.processor,
                     is_begin=is_begin,
                     max_num_frame=self.max_num_frame,
@@ -837,5 +845,3 @@ def has_audio(sample):
     ):
         return True
     return False
-
-
