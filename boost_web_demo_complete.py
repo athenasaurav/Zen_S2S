@@ -128,7 +128,10 @@ def extract_assistant_audio_tokens_only(output_text, audio_offset):
     return assistant_audio_tokens
 
 def clean_text_display(text, task_type="Spoken QA"):
-    """Clean text for display by removing audio tokens properly"""
+    """Enhanced text cleaning to remove system message artifacts and audio tokens"""
+    
+    print(f"🧹 Cleaning text for {task_type}")
+    print(f"   - Original text: {text[:200]}...")
     
     # Remove system/user/assistant markers
     clean_text = text
@@ -149,27 +152,77 @@ def clean_text_display(text, task_type="Spoken QA"):
     # Remove standalone <|audio|> tokens
     clean_text = clean_text.replace("<|audio|>", "")
     
+    # ENHANCED: Remove system message artifacts more aggressively
+    system_artifacts = [
+        "You are a helpful AI assistant.",
+        "You are a helpful AI assistant",
+        "You are a helpful AI .",
+        "You are a helpful AI.",
+        "You are a helpful AI",
+        "You are a helpful AI . .",  # With extra spaces/dots
+        "You are a helpful AI  .",   # With double spaces
+        "You are a helpful AI   .",  # With triple spaces
+    ]
+    
+    for artifact in system_artifacts:
+        clean_text = clean_text.replace(artifact, "")
+    
+    # ENHANCED: Remove task-specific prompts more aggressively
+    task_prompts = [
+        "Convert the speech to text.",
+        "Convert the speech to text",
+        "Convert the text to speech.",
+        "Convert the text to speech",
+        "Convert the speech to text . .",  # With extra spaces/dots
+        "Convert the speech to text  .",   # With double spaces
+    ]
+    
+    for prompt in task_prompts:
+        clean_text = clean_text.replace(prompt, "")
+    
     # Clean up extra whitespace and newlines
     clean_text = re.sub(r"\n\s*\n", "\n", clean_text)  # Remove multiple newlines
     clean_text = re.sub(r"^\s+|\s+$", "", clean_text)  # Remove leading/trailing whitespace
     clean_text = re.sub(r"\s+", " ", clean_text)  # Normalize spaces
     
-    # Handle task-specific cleaning
-    if task_type == "TTS":
-        # For TTS, we just want clean text without any audio markers
-        pass
-    elif task_type == "ASR":
-        # For ASR, clean text should be the transcription
-        # Remove any prompt text that might be included
-        if "Convert the speech to text" in clean_text:
-            clean_text = clean_text.replace("Convert the speech to text", "").strip()
-        if clean_text.startswith("."):
-            clean_text = clean_text[1:].strip()
-    elif task_type == "Spoken QA":
-        # For Spoken QA, remove any echo of the input
-        pass
+    # Remove leading dots, periods, or punctuation
+    clean_text = re.sub(r"^[.\s,;:!?]+", "", clean_text)
     
-    return clean_text.strip(), len(audio_segments), total_audio_tokens
+    # ENHANCED: Task-specific cleaning with more aggressive artifact removal
+    if task_type == "ASR":
+        # For ASR, remove any remaining prompt artifacts and system messages
+        asr_artifacts = [
+            "好的。", "好的", "OK", "ok", "Sure", "sure",
+            "You are a helpful AI", "helpful AI", "AI assistant",
+            "Convert the speech", "speech to text"
+        ]
+        for artifact in asr_artifacts:
+            clean_text = clean_text.replace(artifact, "")
+        
+        # Remove any remaining dots at the beginning
+        while clean_text.startswith(".") or clean_text.startswith(" "):
+            clean_text = clean_text[1:]
+            
+    elif task_type == "Spoken QA":
+        # For Spoken QA, remove system message artifacts that appear at the beginning
+        spoken_qa_artifacts = [
+            "You are a helpful AI", "helpful AI", "AI assistant"
+        ]
+        for artifact in spoken_qa_artifacts:
+            if clean_text.startswith(artifact):
+                clean_text = clean_text[len(artifact):].strip()
+                # Remove any leading punctuation after removing the artifact
+                clean_text = re.sub(r"^[.\s,;:!?]+", "", clean_text)
+    
+    # Final cleanup: remove any remaining leading/trailing whitespace and dots
+    clean_text = clean_text.strip()
+    while clean_text.startswith(".") or clean_text.startswith(" "):
+        clean_text = clean_text[1:].strip()
+    
+    final_text = clean_text.strip()
+    print(f"   - Final cleaned text: '{final_text}'")
+    
+    return final_text, len(audio_segments), total_audio_tokens
 
 class S2SInference:
     """Speech-to-Speech Inference class with CORRECT implementation"""
@@ -480,7 +533,7 @@ def _launch_demo(s2s_engine):
                     max_returned_tokens=2048
                 )
 
-                # IMPROVED: Clean text display using new function
+                # ENHANCED: Clean text display using improved function
                 clean_text, num_segments, total_tokens = clean_text_display(output, task_type=task)
 
                 # Format response based on task
@@ -507,7 +560,7 @@ def _launch_demo(s2s_engine):
                 if tts_speech is not None:
                     try:
                         import soundfile as sf
-                        audio_file_path = f"/tmp/vita_echo_fixed_{int(time.time())}.wav"
+                        audio_file_path = f"/tmp/vita_final_clean_{int(time.time())}.wav"
                         sf.write(audio_file_path, tts_speech, 16000)
                         response_text += f"\n🔊 Audio saved: {os.path.basename(audio_file_path)}"
                         print(f"✅ Audio file saved: {audio_file_path}")
@@ -533,15 +586,15 @@ def _launch_demo(s2s_engine):
     def predict_reset_task_history():
         return []
 
-    with gr.Blocks(title="VITA-Audio-Boost ECHO FIXED") as demo:
+    with gr.Blocks(title="VITA-Audio-Boost FINAL CLEAN") as demo:
         gr.Markdown(
-            """<center><font size=8>VITA-Audio-Boost ECHO FIXED</font></center>"""
+            """<center><font size=8>VITA-Audio-Boost FINAL CLEAN</font></center>"""
         )
         gr.Markdown(
-            """<center><font size=4>Fixed audio echo by extracting only assistant's audio tokens!</font></center>"""
+            """<center><font size=4>Perfect text cleaning + No audio echo!</font></center>"""
         )
         gr.Markdown(
-            """<center>✅ TTS: Perfect ✅ ASR: Clean ✅ Spoken QA: No echo! 🎵</center>"""
+            """<center>✅ TTS: Perfect ✅ ASR: Clean transcription ✅ Spoken QA: Clean response + No echo! 🎵</center>"""
         )
 
         chatbot = gr.Chatbot(label="VITA-Audio-Boost", height=600, type="messages")
@@ -666,7 +719,7 @@ def _launch_demo(s2s_engine):
     return demo
 
 if __name__ == "__main__":
-    print("🚀 Starting VITA-Audio-Boost ECHO FIXED Demo...")
+    print("🚀 Starting VITA-Audio-Boost FINAL CLEAN Demo...")
     
     # Audio tokenizer rank
     audio_tokenizer_rank = 0
@@ -695,7 +748,7 @@ if __name__ == "__main__":
         print("⚠️  Installing soundfile for audio generation...")
         os.system("pip install soundfile")
 
-    print("🌐 Launching ECHO FIXED demo...")
+    print("🌐 Launching FINAL CLEAN demo...")
     try:
         demo = _launch_demo(s2s_engine)
         demo.launch(
