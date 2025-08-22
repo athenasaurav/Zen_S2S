@@ -6,6 +6,7 @@ import time
 import warnings
 import re
 from threading import Thread
+from datetime import datetime, timezone
 
 import gradio as gr
 import numpy as np
@@ -36,6 +37,21 @@ except ImportError as e:
     AUDIO_MODULES_AVAILABLE = False
 
 PUNCTUATION = "!?.,;:~…@#$%^&*()_+-=[]{}|\\`\"'<>/\n\t "
+
+def get_utc_timestamp():
+    """Get current UTC timestamp in ISO format"""
+    return datetime.now(timezone.utc).isoformat()
+
+def log_event(event_type, task_type, message, **kwargs):
+    """Log event with UTC timestamp and task context"""
+    timestamp = get_utc_timestamp()
+    task_info = f"[{task_type}]" if task_type else ""
+    print(f"{timestamp} {task_info} {event_type}: {message}")
+    
+    # Log additional kwargs if provided
+    for key, value in kwargs.items():
+        if value is not None:
+            print(f"{timestamp} {task_info} {event_type}: {key}: {value}")
 
 @jit
 def wav_to_int16(audio: np.ndarray) -> np.ndarray:
@@ -95,43 +111,43 @@ def extract_assistant_audio_tokens_only(output_text, audio_offset):
     """
     CRITICAL FIX: Extract ONLY assistant's audio tokens, excluding user's audio tokens
     """
-    print(f"🎯 Extracting ONLY assistant audio tokens...")
-    print(f"   - Full output length: {len(output_text)}")
+    log_event("EXTRACT", "AUDIO_TOKENS", "Extracting ONLY assistant audio tokens...")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"Full output length: {len(output_text)}")
     
     # Find the assistant section
     assistant_marker = "<|im_start|>assistant"
     assistant_start = output_text.find(assistant_marker)
     
     if assistant_start == -1:
-        print("   - No assistant section found!")
+        log_event("EXTRACT", "AUDIO_TOKENS", "No assistant section found!")
         return []
     
     # Extract only the assistant's part
     assistant_section = output_text[assistant_start:]
-    print(f"   - Assistant section length: {len(assistant_section)}")
-    print(f"   - Assistant section preview: {assistant_section[:200]}...")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"Assistant section length: {len(assistant_section)}")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"Assistant section preview: {assistant_section[:200]}...")
     
     # Find all audio segments in assistant section only
     assistant_audio_segments = find_audio_segments_regex(assistant_section)
-    print(f"   - Found {len(assistant_audio_segments)} audio segments in assistant response")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"Found {len(assistant_audio_segments)} audio segments in assistant response")
     
     # Extract token IDs from assistant's audio segments only
     assistant_audio_tokens = []
     for i, segment in enumerate(assistant_audio_segments):
         tokens = extract_token_ids_as_int(segment)
-        print(f"   - Assistant segment {i+1}: {len(tokens)} tokens")
+        log_event("EXTRACT", "AUDIO_TOKENS", f"Assistant segment {i+1}: {len(tokens)} tokens")
         assistant_audio_tokens.extend(tokens)
     
-    print(f"   - Total assistant audio tokens: {len(assistant_audio_tokens)}")
-    print(f"   - First few assistant tokens: {assistant_audio_tokens[:10] if assistant_audio_tokens else 'None'}")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"Total assistant audio tokens: {len(assistant_audio_tokens)}")
+    log_event("EXTRACT", "AUDIO_TOKENS", f"First few assistant tokens: {assistant_audio_tokens[:10] if assistant_audio_tokens else 'None'}")
     
     return assistant_audio_tokens
 
 def clean_text_display(text, task_type="Spoken QA"):
     """Enhanced text cleaning to remove system message artifacts and audio tokens"""
     
-    print(f"🧹 Cleaning text for {task_type}")
-    print(f"   - Original text: {text[:200]}...")
+    log_event("CLEAN", task_type, f"Cleaning text for {task_type}")
+    log_event("CLEAN", task_type, f"Original text: {text[:200]}...")
     
     # Remove system/user/assistant markers
     clean_text = text
@@ -220,12 +236,12 @@ def clean_text_display(text, task_type="Spoken QA"):
         clean_text = clean_text[1:].strip()
     
     final_text = clean_text.strip()
-    print(f"   - Final cleaned text: '{final_text}'")
+    log_event("CLEAN", task_type, f"Final cleaned text: '{final_text}'")
     
     return final_text, len(audio_segments), total_audio_tokens
 
 class S2SInference:
-    """Speech-to-Speech Inference class with CORRECT implementation"""
+    """Speech-to-Speech Inference class with CORRECT implementation and TIMING METRICS"""
     
     def __init__(self, model_name_or_path, audio_tokenizer_path, audio_tokenizer_type, flow_path, audio_tokenizer_rank=0):
         self.model_name_or_path = model_name_or_path
@@ -235,15 +251,15 @@ class S2SInference:
         self.audio_tokenizer_rank = audio_tokenizer_rank
         
         # Load tokenizer
-        print("📝 Loading tokenizer...")
+        log_event("INIT", "SYSTEM", "Loading tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path,
             trust_remote_code=True,
         )
-        print(f"✅ Tokenizer loaded: {self.tokenizer.__class__.__name__}")
+        log_event("INIT", "SYSTEM", "Tokenizer loaded")
         
         # Load model
-        print("🤖 Loading model...")
+        log_event("INIT", "SYSTEM", "Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             trust_remote_code=True,
@@ -251,10 +267,9 @@ class S2SInference:
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         ).eval()
-        print(f"✅ Model loaded: {self.model.__class__.__name__}")
+        log_event("INIT", "SYSTEM", "Model loaded")
         
         # Load audio tokenizer with CORRECT paths
-        print("🎵 Loading GLM-4-Voice audio tokenizer...")
         if AUDIO_MODULES_AVAILABLE:
             try:
                 self.audio_tokenizer = get_audio_tokenizer(
@@ -263,9 +278,9 @@ class S2SInference:
                     flow_path=flow_path,
                     rank=audio_tokenizer_rank,
                 )
-                print(f"✅ GLM-4-Voice audio tokenizer loaded: {self.audio_tokenizer.__class__.__name__}")
+                log_event("INIT", "SYSTEM", "Zen audio Vocoder loaded")
             except Exception as e:
-                print(f"❌ Error loading GLM-4-Voice audio tokenizer: {e}")
+                log_event("INIT", "SYSTEM", f"Error loading Zen audio tokenizer: {e}")
                 self.audio_tokenizer = None
         else:
             self.audio_tokenizer = None
@@ -303,16 +318,21 @@ class S2SInference:
         
         # Get audio offset
         self.audio_offset = self.tokenizer.convert_tokens_to_ids("<|audio_0|>")
-        print(f"Audio offset: {self.audio_offset}")
+        log_event("INIT", "SYSTEM", f"Audio offset: {self.audio_offset}")
 
     def run_infer(self, audio_path=None, prompt_audio_path=None, message="", task_type="Spoken QA",
                   stream_stride=4, max_returned_tokens=4096, sample_rate=16000, mode=None):
-        """Main inference function with CORRECT implementation and FIXED audio token extraction"""
+        """Main inference function with CORRECT implementation, FIXED audio token extraction, and TIMING METRICS"""
         
-        print(f"🔍 run_infer called with:")
-        print(f"   - audio_path: {audio_path}")
-        print(f"   - message: {message}")
-        print(f"   - task_type: {task_type}")
+        # Start timing for TTFT/TTFB calculation
+        request_start_time = time.time()
+        request_start_utc = get_utc_timestamp()
+        
+        log_event("INFER", task_type, f"run_infer called with:")
+        log_event("INFER", task_type, f"audio_path: {audio_path}")
+        log_event("INFER", task_type, f"message: {message}")
+        log_event("INFER", task_type, f"task_type: {task_type}")
+        log_event("INFER", task_type, f"Request started at: {request_start_utc}")
         
         # Prepare messages based on task type and README format
         if task_type == "TTS":
@@ -323,7 +343,7 @@ class S2SInference:
                     "content": f"Convert the text to speech.\n{message}",
                 }
             ]
-            print(f"🎵 TTS mode: Converting '{message}' to speech")
+            log_event("INFER", task_type, f"TTS mode: Converting '{message}' to speech")
             
         elif task_type == "ASR":
             # ASR format from README: "Convert the speech to text.\n<|audio|>"
@@ -337,7 +357,7 @@ class S2SInference:
                     "content": "Convert the speech to text.\n<|audio|>",
                 }
             ]
-            print(f"🎤 ASR mode: Converting audio file '{audio_path}' to text")
+            log_event("INFER", task_type, f"ASR mode: Converting audio file '{audio_path}' to text")
             
         else:  # Spoken QA
             # Spoken QA format: just <|audio|> for audio input, or regular text
@@ -348,7 +368,7 @@ class S2SInference:
                         "content": "<|audio|>",
                     }
                 ]
-                print(f"🗣️ Spoken QA mode: Audio input '{audio_path}'")
+                log_event("INFER", task_type, f"Spoken QA mode: Audio input '{audio_path}'")
             else:
                 messages = self.default_system_message + [
                     {
@@ -356,17 +376,20 @@ class S2SInference:
                         "content": message,
                     }
                 ]
-                print(f"🗣️ Spoken QA mode: Text input '{message}'")
+                log_event("INFER", task_type, f"Spoken QA mode: Text input '{message}'")
 
         # Apply chat template
+        template_start_time = time.time()
         input_ids = self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
         )
+        template_time = time.time() - template_start_time
+        log_event("INFER", task_type, f"Chat template applied in {template_time:.3f}s")
 
-        print(f"Input: {self.tokenizer.decode(input_ids[0], skip_special_tokens=False)}")
+        log_event("INFER", task_type, f"Input: {self.tokenizer.decode(input_ids[0], skip_special_tokens=False)}")
 
         # Handle audio input processing for contiguous codec
         audios = None
@@ -374,51 +397,61 @@ class S2SInference:
         
         # CRITICAL FIX: For ASR and Spoken QA with audio, we need to process the audio file
         if (audio_path is not None or prompt_audio_path is not None) and self.audio_tokenizer:
-            print(f"🎵 Processing audio input with tokenizer...")
+            log_event("INFER", task_type, f"Processing audio input with tokenizer...")
             
             # Check if audio tokenizer applies to user role
             if self.audio_tokenizer.apply_to_role("user", is_contiguous=True):
-                print("🎵 Using contiguous codec for audio processing")
+                log_event("INFER", task_type, "Using contiguous codec for audio processing")
                 # Contiguous codec
                 audio_paths = []
                 if audio_path is not None:
                     audio_paths.append(audio_path)
-                    print(f"   - Added audio_path: {audio_path}")
+                    log_event("INFER", task_type, f"Added audio_path: {audio_path}")
                 if prompt_audio_path is not None:
                     audio_paths.append(prompt_audio_path)
-                    print(f"   - Added prompt_audio_path: {prompt_audio_path}")
+                    log_event("INFER", task_type, f"Added prompt_audio_path: {prompt_audio_path}")
                     
+                audio_process_start = time.time()
                 input_ids, audios, audio_indices = add_audio_input_contiguous(
                     input_ids, audio_paths, self.tokenizer, self.audio_tokenizer
                 )
-                print(f"   - Processed {len(audio_paths)} audio files")
-                print(f"   - audios shape: {audios.shape if audios is not None else None}")
-                print(f"   - audio_indices: {audio_indices}")
+                audio_process_time = time.time() - audio_process_start
+                log_event("INFER", task_type, f"Processed {len(audio_paths)} audio files in {audio_process_time:.3f}s")
+                log_event("INFER", task_type, f"audios shape: {audios.shape if audios is not None else None}")
+                log_event("INFER", task_type, f"audio_indices: {audio_indices}")
                 
             elif self.audio_tokenizer.apply_to_role("user", is_discrete=True):
-                print("🎵 Using discrete codec for audio processing")
+                log_event("INFER", task_type, "Using discrete codec for audio processing")
                 # Discrete codec - encode audio to tokens
                 if audio_path is not None:
+                    audio_encode_start = time.time()
                     audio_tokens = self.audio_tokenizer.encode(audio_path)
+                    audio_encode_time = time.time() - audio_encode_start
                     audio_tokens_str = "".join([f"<|audio_{i}|>" for i in audio_tokens])
-                    print(f"   - Encoded audio to {len(audio_tokens)} tokens")
+                    log_event("INFER", task_type, f"Encoded audio to {len(audio_tokens)} tokens in {audio_encode_time:.3f}s")
                     
                     # Replace <|audio|> in the input with actual audio tokens
                     input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
                     input_text = input_text.replace("<|audio|>", f"<|begin_of_audio|>{audio_tokens_str}<|end_of_audio|>")
                     
                     # Re-tokenize with audio tokens
+                    retokenize_start = time.time()
                     input_ids = self.tokenizer.encode(input_text, return_tensors="pt")
-                    print(f"   - Re-tokenized input with audio tokens")
+                    retokenize_time = time.time() - retokenize_start
+                    log_event("INFER", task_type, f"Re-tokenized input with audio tokens in {retokenize_time:.3f}s")
             else:
-                print("⚠️  Audio tokenizer doesn't apply to user role")
+                log_event("INFER", task_type, "Audio tokenizer doesn't apply to user role")
 
         # Move to device
+        device_move_start = time.time()
         input_ids = input_ids.to(self.model.device)
+        device_move_time = time.time() - device_move_start
+        log_event("INFER", task_type, f"Input moved to device in {device_move_time:.3f}s")
 
         # Generate
         torch.cuda.synchronize()
-        start = time.time()
+        generation_start_time = time.time()
+        generation_start_utc = get_utc_timestamp()
         
         # Use the correct generation parameters for VITA-Audio-Boost
         generation_kwargs = {
@@ -437,48 +470,87 @@ class S2SInference:
         if audio_indices is not None:
             generation_kwargs["audio_indices"] = audio_indices
             
-        print(f"🚀 Generating with parameters: {list(generation_kwargs.keys())}")
+        log_event("INFER", task_type, f"Generating with parameters: {list(generation_kwargs.keys())}")
+        log_event("INFER", task_type, f"Generation started at: {generation_start_utc}")
         
         outputs = self.model.generate(**generation_kwargs)
         
         torch.cuda.synchronize()
-        end = time.time()
+        generation_end_time = time.time()
+        generation_end_utc = get_utc_timestamp()
+        generation_time = generation_end_time - generation_start_time
         
-        print(f"Generation time: {end - start:.2f}s")
+        log_event("INFER", task_type, f"Generation completed at: {generation_end_utc}")
+        log_event("INFER", task_type, f"Generation time: {generation_time:.3f}s")
         
         # Decode output
+        decode_start_time = time.time()
         output = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
-        print(f"Output: {output}")
+        decode_time = time.time() - decode_start_time
+        log_event("INFER", task_type, f"Output decoded in {decode_time:.3f}s")
+        log_event("INFER", task_type, f"Output: {output}")
 
         # CRITICAL FIX: Extract ONLY assistant's audio tokens for decoding
         if task_type == "Spoken QA" and audio_path:
             # For Spoken QA with audio input, extract only assistant's audio tokens
+            extract_start_time = time.time()
             assistant_audio_tokens = extract_assistant_audio_tokens_only(output, self.audio_offset)
-            print(f"🎯 Using ONLY assistant's {len(assistant_audio_tokens)} audio tokens for decoding")
+            extract_time = time.time() - extract_start_time
+            log_event("INFER", task_type, f"Using ONLY assistant's {len(assistant_audio_tokens)} audio tokens for decoding (extracted in {extract_time:.3f}s)")
         else:
             # For TTS and ASR, use the original method (extract all audio tokens)
+            extract_start_time = time.time()
             assistant_audio_tokens = []
             for token_id in outputs[0]:
                 if token_id >= self.audio_offset:
                     assistant_audio_tokens.append(token_id - self.audio_offset)
-            print(f"Extracted {len(assistant_audio_tokens)} audio tokens for decoding (standard method)")
+            extract_time = time.time() - extract_start_time
+            log_event("INFER", task_type, f"Extracted {len(assistant_audio_tokens)} audio tokens for decoding (standard method) in {extract_time:.3f}s")
 
         # Decode audio if we have tokens and audio tokenizer
         tts_speech = None
         if len(assistant_audio_tokens) > 0 and self.audio_tokenizer:
             try:
-                print("🎵 Decoding ONLY assistant's audio tokens with GLM-4-Voice...")
+                log_event("INFER", task_type, "Decoding ONLY assistant's audio tokens with GLM-4-Voice...")
+                audio_decode_start_time = time.time()
                 tts_speech = self.audio_tokenizer.decode(
                     assistant_audio_tokens, source_speech_16k=prompt_audio_path
                 )
-                print(f"✅ Audio decoded successfully! Shape: {tts_speech.shape if tts_speech is not None else 'None'}")
+                audio_decode_time = time.time() - audio_decode_start_time
+                log_event("INFER", task_type, f"Audio decoded successfully in {audio_decode_time:.3f}s! Shape: {tts_speech.shape if tts_speech is not None else 'None'}")
             except Exception as e:
-                print(f"❌ Audio decoding error: {e}")
+                log_event("INFER", task_type, f"Audio decoding error: {e}")
                 import traceback
                 traceback.print_exc()
                 tts_speech = None
         elif len(assistant_audio_tokens) > 0:
-            print("⚠️  Audio tokens found but no audio tokenizer available")
+            log_event("INFER", task_type, "Audio tokens found but no audio tokenizer available")
+        
+        # Calculate final timing metrics
+        request_end_time = time.time()
+        request_end_utc = get_utc_timestamp()
+        total_request_time = request_end_time - request_start_time
+        
+        # Calculate TTFT (Time To First Token) and TTFB (Time To First Byte)
+        if task_type == "TTS":
+            # For TTS: TTFB = time to first audio token generation
+            ttfb = generation_time  # Time to generate audio tokens
+            log_event("TIMING", task_type, f"TTFB (Time To First Audio Token): {ttfb:.3f}s")
+        elif task_type == "ASR":
+            # For ASR: TTFT = time to first text token generation
+            ttft = generation_time  # Time to generate text tokens
+            log_event("TIMING", task_type, f"TTFT (Time To First Text Token): {ttft:.3f}s")
+        else:  # Spoken QA
+            # For Spoken QA: both TTFT and TTFB
+            ttft = generation_time  # Time to generate response
+            log_event("TIMING", task_type, f"TTFT (Time To First Response): {ttft:.3f}s")
+            if len(assistant_audio_tokens) > 0:
+                # For Spoken QA with audio output, TTFB is the same as generation time
+                ttfb = generation_time
+                log_event("TIMING", task_type, f"TTFB (Time To First Audio Token): {ttfb:.3f}s")
+        
+        log_event("TIMING", task_type, f"Total request time: {total_request_time:.3f}s")
+        log_event("TIMING", task_type, f"Request completed at: {request_end_utc}")
         
         return output, tts_speech
 
@@ -488,8 +560,8 @@ def _launch_demo(s2s_engine):
             return chatbot, task_history, None
             
         chat_query = task_history[-1][0]
-        print(f"🔍 Processing query: {chat_query}")
-        print(f"🔍 Query type: {type(chat_query)}")
+        log_event("CHAT", task, f"Processing query: {chat_query}")
+        log_event("CHAT", task, f"Query type: {type(chat_query)}")
 
         try:
             # CRITICAL FIX: Properly detect audio vs text input
@@ -500,22 +572,22 @@ def _launch_demo(s2s_engine):
                 # Audio file path
                 audio_path = chat_query
                 message = ""
-                print(f"🎵 Audio input detected: {audio_path}")
+                log_event("CHAT", task, f"Audio input detected: {audio_path}")
             elif isinstance(chat_query, (tuple, list)) and len(chat_query) > 0:
                 # Gradio audio component returns tuple/list
                 if is_wav(chat_query[0]):
                     audio_path = chat_query[0]
                     message = ""
-                    print(f"🎵 Audio input detected (from tuple): {audio_path}")
+                    log_event("CHAT", task, f"Audio input detected (from tuple): {audio_path}")
                 else:
                     audio_path = None
                     message = str(chat_query[0])
-                    print(f"📝 Text input detected (from tuple): {message}")
+                    log_event("CHAT", task, f"Text input detected (from tuple): {message}")
             else:
                 # Text input
                 audio_path = None
                 message = str(chat_query)
-                print(f"📝 Text input detected: {message}")
+                log_event("CHAT", task, f"Text input detected: {message}")
 
             # Validate inputs based on task
             if task == "ASR" and audio_path is None:
@@ -563,9 +635,9 @@ def _launch_demo(s2s_engine):
                         audio_file_path = f"/tmp/vita_final_clean_{int(time.time())}.wav"
                         sf.write(audio_file_path, tts_speech, 16000)
                         response_text += f"\n🔊 Audio saved: {os.path.basename(audio_file_path)}"
-                        print(f"✅ Audio file saved: {audio_file_path}")
+                        log_event("CHAT", task, f"Audio file saved: {audio_file_path}")
                     except Exception as e:
-                        print(f"❌ Error saving audio: {e}")
+                        log_event("CHAT", task, f"Error saving audio: {e}")
 
             # Update chat
             chatbot.append((chat_query, response_text))
@@ -574,7 +646,7 @@ def _launch_demo(s2s_engine):
             
         except Exception as e:
             error_msg = f"Error during inference: {str(e)}"
-            print(error_msg)
+            log_event("ERROR", task, error_msg)
             import traceback
             traceback.print_exc()
             chatbot.append((chat_query, error_msg))
@@ -586,18 +658,18 @@ def _launch_demo(s2s_engine):
     def predict_reset_task_history():
         return []
 
-    with gr.Blocks(title="VITA-Audio-Boost FINAL CLEAN") as demo:
+    with gr.Blocks(title="Zen-Audio-Boost Demo") as demo:
         gr.Markdown(
-            """<center><font size=8>VITA-Audio-Boost FINAL CLEAN</font></center>"""
+            """<center><font size=8>Zen-Audio-Boost Demo</font></center>"""
         )
-        gr.Markdown(
-            """<center><font size=4>Perfect text cleaning + No audio echo!</font></center>"""
-        )
-        gr.Markdown(
-            """<center>✅ TTS: Perfect ✅ ASR: Clean transcription ✅ Spoken QA: Clean response + No echo! 🎵</center>"""
-        )
+        # gr.Markdown(
+        #     """<center><font size=4>Perfect text cleaning + No audio echo!</font></center>"""
+        # )
+        # gr.Markdown(
+        #     """<center>✅ TTS: Perfect ✅ ASR: Clean transcription ✅ Spoken QA: Clean response + No echo! 🎵</center>"""
+        # )
 
-        chatbot = gr.Chatbot(label="VITA-Audio-Boost", height=600, type="messages")
+        chatbot = gr.Chatbot(label="Zen-Audio-Boost Demo", height=600, type="messages")
         
         with gr.Row():
             with gr.Column(scale=3):
@@ -636,10 +708,10 @@ def _launch_demo(s2s_engine):
 
         # Helper functions with FIXED audio handling
         def add_text(history, task_history, text, audio):
-            print(f"🔍 add_text called with:")
-            print(f"   - text: {text}")
-            print(f"   - audio: {audio}")
-            print(f"   - audio type: {type(audio)}")
+            log_event("UI", "INTERFACE", f"add_text called with:")
+            log_event("UI", "INTERFACE", f"text: {text}")
+            log_event("UI", "INTERFACE", f"audio: {audio}")
+            log_event("UI", "INTERFACE", f"audio type: {type(audio)}")
             
             if audio is not None:
                 # Audio input - store the file path
@@ -719,7 +791,7 @@ def _launch_demo(s2s_engine):
     return demo
 
 if __name__ == "__main__":
-    print("🚀 Starting VITA-Audio-Boost FINAL CLEAN Demo...")
+    log_event("STARTUP", "SYSTEM", "Starting Zen-Audio-Boost Demo...")
     
     # Audio tokenizer rank
     audio_tokenizer_rank = 0
@@ -733,9 +805,9 @@ if __name__ == "__main__":
             flow_path=flow_path,
             audio_tokenizer_rank=audio_tokenizer_rank
         )
-        print("✅ S2S inference engine created successfully!")
+        log_event("STARTUP", "SYSTEM", "S2S inference engine created successfully!")
     except Exception as e:
-        print(f"❌ Error creating S2S inference engine: {e}")
+        log_event("STARTUP", "SYSTEM", f"Error creating S2S inference engine: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -743,12 +815,12 @@ if __name__ == "__main__":
     # Install soundfile if not available
     try:
         import soundfile
-        print("✅ soundfile available for audio generation")
+        log_event("STARTUP", "SYSTEM", "soundfile available for audio generation")
     except ImportError:
-        print("⚠️  Installing soundfile for audio generation...")
+        log_event("STARTUP", "SYSTEM", "Installing soundfile for audio generation...")
         os.system("pip install soundfile")
 
-    print("🌐 Launching FINAL CLEAN demo...")
+    log_event("STARTUP", "SYSTEM", "Launching FINAL CLEAN demo with TIMING METRICS...")
     try:
         demo = _launch_demo(s2s_engine)
         demo.launch(
@@ -759,7 +831,7 @@ if __name__ == "__main__":
             show_error=True,
         )
     except Exception as e:
-        print(f"❌ Error launching demo: {e}")
+        log_event("STARTUP", "SYSTEM", f"Error launching demo: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
