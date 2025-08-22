@@ -5,14 +5,14 @@ import sys
 import time
 import warnings
 import re
-from threading import Thread
+
 from datetime import datetime, timezone
 
 import gradio as gr
 import numpy as np
 import torch
 from numba import jit
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 # Add GLM-4-Voice paths (ENABLE GLM-4-Voice tokenizer)
 if True:  # Changed from False to True!
@@ -319,6 +319,8 @@ class S2SInference:
         # Get audio offset
         self.audio_offset = self.tokenizer.convert_tokens_to_ids("<|audio_0|>")
         log_event("INIT", "SYSTEM", f"Audio offset: {self.audio_offset}")
+        
+
 
     def run_infer(self, audio_path=None, prompt_audio_path=None, message="", task_type="Spoken QA",
                   stream_stride=4, max_returned_tokens=4096, sample_rate=16000, mode=None):
@@ -420,6 +422,16 @@ class S2SInference:
                 log_event("INFER", task_type, f"audios shape: {audios.shape if audios is not None else None}")
                 log_event("INFER", task_type, f"audio_indices: {audio_indices}")
                 
+                # Log detailed contiguous codec processing
+                log_event("AUDIO_ENCODING", task_type, f"Contiguous codec processing breakdown:")
+                log_event("AUDIO_ENCODING", task_type, f"  - Audio files processed: {len(audio_paths)}")
+                log_event("AUDIO_ENCODING", task_type, f"  - Processing time: {audio_process_time:.3f}s")
+                log_event("AUDIO_ENCODING", task_type, f"  - Audio tensor shape: {audios.shape if audios is not None else 'None'}")
+                log_event("AUDIO_ENCODING", task_type, f"  - Audio indices: {audio_indices}")
+                if audio_paths:
+                    for i, path in enumerate(audio_paths):
+                        log_event("AUDIO_ENCODING", task_type, f"  - Audio file {i+1}: {os.path.basename(path)}")
+                
             elif self.audio_tokenizer.apply_to_role("user", is_discrete=True):
                 log_event("INFER", task_type, "Using discrete codec for audio processing")
                 # Discrete codec - encode audio to tokens
@@ -430,6 +442,15 @@ class S2SInference:
                     audio_tokens_str = "".join([f"<|audio_{i}|>" for i in audio_tokens])
                     log_event("INFER", task_type, f"Encoded audio to {len(audio_tokens)} tokens in {audio_encode_time:.3f}s")
                     
+                    # Log detailed audio encoding analysis
+                    log_event("AUDIO_ENCODING", task_type, f"Audio input processing breakdown:")
+                    log_event("AUDIO_ENCODING", task_type, f"  - Audio file: {os.path.basename(audio_path)}")
+                    log_event("AUDIO_ENCODING", task_type, f"  - Audio encoding time: {audio_encode_time:.3f}s")
+                    log_event("AUDIO_ENCODING", task_type, f"  - Generated {len(audio_tokens)} audio tokens")
+                    log_event("AUDIO_ENCODING", task_type, f"  - First audio token ID: {audio_tokens[0] if audio_tokens else 'None'}")
+                    log_event("AUDIO_ENCODING", task_type, f"  - Last audio token ID: {audio_tokens[-1] if audio_tokens else 'None'}")
+                    log_event("AUDIO_ENCODING", task_type, f"  - Audio token range: {min(audio_tokens) if audio_tokens else 'None'} to {max(audio_tokens) if audio_tokens else 'None'}")
+                    
                     # Replace <|audio|> in the input with actual audio tokens
                     input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
                     input_text = input_text.replace("<|audio|>", f"<|begin_of_audio|>{audio_tokens_str}<|end_of_audio|>")
@@ -439,6 +460,10 @@ class S2SInference:
                     input_ids = self.tokenizer.encode(input_text, return_tensors="pt")
                     retokenize_time = time.time() - retokenize_start
                     log_event("INFER", task_type, f"Re-tokenized input with audio tokens in {retokenize_time:.3f}s")
+                    
+                    # Log total audio processing time
+                    total_audio_process_time = audio_encode_time + retokenize_time
+                    log_event("AUDIO_ENCODING", task_type, f"Total audio processing time: {total_audio_process_time:.3f}s (encode: {audio_encode_time:.3f}s + retokenize: {retokenize_time:.3f}s)")
             else:
                 log_event("INFER", task_type, "Audio tokenizer doesn't apply to user role")
 
@@ -448,10 +473,21 @@ class S2SInference:
         device_move_time = time.time() - device_move_start
         log_event("INFER", task_type, f"Input moved to device in {device_move_time:.3f}s")
 
-        # Generate
+        # Generate with REAL-TIME streaming to track first token timing
         torch.cuda.synchronize()
         generation_start_time = time.time()
         generation_start_utc = get_utc_timestamp()
+        
+        # Track first token timing in REAL-TIME
+        first_text_token_time = None
+        first_audio_token_time = None
+        first_text_token_id = None
+        first_audio_token_id = None
+        first_text_token_text = None
+        
+        log_event("INFER", task_type, f"Generation started at: {generation_start_utc}")
+        log_event("INFER", task_type, f"Tracking first text and audio token generation in REAL-TIME...")
+        log_event("INFER", task_type, f"Using TextIteratorStreamer to measure actual token generation latency")
         
         # Use the correct generation parameters for VITA-Audio-Boost
         generation_kwargs = {
@@ -471,9 +507,81 @@ class S2SInference:
             generation_kwargs["audio_indices"] = audio_indices
             
         log_event("INFER", task_type, f"Generating with parameters: {list(generation_kwargs.keys())}")
-        log_event("INFER", task_type, f"Generation started at: {generation_start_utc}")
         
-        outputs = self.model.generate(**generation_kwargs)
+        # IMPLEMENT REAL-TIME TOKEN TRACKING with progressive generation
+        try:
+            log_event("REAL_TIME", task_type, f"🎯 Starting progressive token generation for real-time timing...")
+            
+            # Generate tokens progressively to track first token timing
+            generated_tokens = []
+            token_count = 0
+            max_tokens_to_generate = min(100, max_returned_tokens)  # Generate first 100 tokens for timing
+            
+            # Progressive generation: generate in small batches to track first tokens
+            for batch_start in range(0, max_returned_tokens, max_tokens_to_generate):
+                batch_size = min(max_tokens_to_generate, max_returned_tokens - batch_start)
+                
+                # Generate this batch
+                batch_kwargs = generation_kwargs.copy()
+                batch_kwargs["max_new_tokens"] = batch_size
+                batch_kwargs["input_ids"] = torch.cat([input_ids, torch.tensor([generated_tokens]).to(self.model.device)], dim=1) if generated_tokens else input_ids
+                
+                batch_start_time = time.time()
+                batch_outputs = self.model.generate(**batch_kwargs)
+                batch_time = time.time() - batch_start_time
+                
+                # Extract new tokens from this batch
+                if len(generated_tokens) == 0:
+                    # First batch - extract new tokens after input
+                    new_tokens = batch_outputs[0][input_ids.shape[1]:]
+                else:
+                    # Subsequent batches - extract new tokens
+                    new_tokens = batch_outputs[0][-batch_size:]
+                
+                # Process each new token for timing
+                for i, token_id in enumerate(new_tokens):
+                    current_time = time.time()
+                    token_latency = current_time - generation_start_time
+                    token_count += 1
+                    
+                    # Track first text token timing
+                    if first_text_token_time is None and token_id < self.audio_offset:
+                        first_text_token_time = token_latency
+                        first_text_token_id = token_id.item()
+                        first_text_token_text = self.tokenizer.decode([token_id], skip_special_tokens=False)
+                        log_event("REAL_TIME", task_type, f"🎯 FIRST TEXT TOKEN generated at {first_text_token_time:.3f}s: '{first_text_token_text}' (ID: {token_id.item()})")
+                    
+                    # Track first audio token timing
+                    elif first_audio_token_time is None and token_id >= self.audio_offset:
+                        first_audio_token_time = token_latency
+                        first_audio_token_id = token_id.item() - self.audio_offset
+                        log_event("REAL_TIME", task_type, f"🎵 FIRST AUDIO TOKEN generated at {first_audio_token_time:.3f}s: audio_{first_audio_token_id}")
+                    
+                    generated_tokens.append(token_id.item())
+                    
+                    # Log progress every 10 tokens
+                    if token_count % 10 == 0:
+                        log_event("REAL_TIME", task_type, f"Generated {token_count} tokens in {token_latency:.3f}s")
+                
+                # If we found both first tokens, we can stop early
+                if first_text_token_time is not None and first_audio_token_time is not None:
+                    log_event("REAL_TIME", task_type, f"✅ Found both first tokens, stopping early at {token_count} tokens")
+                    break
+                
+                # If this batch was small, we're done
+                if len(new_tokens) < batch_size:
+                    break
+            
+            # Use the final batch output as our main output
+            outputs = batch_outputs
+            
+            log_event("REAL_TIME", task_type, f"✅ Progressive generation completed: {token_count} tokens")
+            
+        except Exception as e:
+            log_event("REAL_TIME", task_type, f"⚠️  Progressive generation failed, falling back to normal generation: {e}")
+            log_event("REAL_TIME", task_type, f"⚠️  Will use post-generation analysis instead of real-time timing")
+            # Fallback to normal generation
+            outputs = self.model.generate(**generation_kwargs)
         
         torch.cuda.synchronize()
         generation_end_time = time.time()
@@ -482,6 +590,25 @@ class S2SInference:
         
         log_event("INFER", task_type, f"Generation completed at: {generation_end_utc}")
         log_event("INFER", task_type, f"Generation time: {generation_time:.3f}s")
+        
+        # Real-time token tracking already completed above
+        # Now just log the final generation summary
+        if len(outputs) > 0:
+            generated_tokens = outputs[0]
+            log_event("INFER", task_type, f"Generated {len(generated_tokens)} total tokens")
+            
+            # Log real-time timing results
+            if first_text_token_time is not None:
+                log_event("TIMING", task_type, f"✅ First text token '{first_text_token_text}' generated in {first_text_token_time:.3f}s")
+            else:
+                log_event("TIMING", task_type, "⚠️  No text tokens found in generation")
+                
+            if first_audio_token_time is not None:
+                log_event("TIMING", task_type, f"✅ First audio token generated in {first_audio_token_time:.3f}s")
+            else:
+                log_event("TIMING", task_type, "⚠️  No audio tokens found in generation")
+        else:
+            log_event("TIMING", task_type, "⚠️  No tokens generated")
         
         # Decode output
         decode_start_time = time.time()
@@ -497,6 +624,15 @@ class S2SInference:
             assistant_audio_tokens = extract_assistant_audio_tokens_only(output, self.audio_offset)
             extract_time = time.time() - extract_start_time
             log_event("INFER", task_type, f"Using ONLY assistant's {len(assistant_audio_tokens)} audio tokens for decoding (extracted in {extract_time:.3f}s)")
+            
+            # Log detailed audio token analysis for Spoken QA
+            if assistant_audio_tokens:
+                log_event("AUDIO_ANALYSIS", task_type, f"Assistant audio tokens breakdown:")
+                log_event("AUDIO_ANALYSIS", task_type, f"  - Total audio tokens: {len(assistant_audio_tokens)}")
+                log_event("AUDIO_ANALYSIS", task_type, f"  - First audio token ID: {assistant_audio_tokens[0]}")
+                log_event("AUDIO_ANALYSIS", task_type, f"  - Last audio token ID: {assistant_audio_tokens[-1]}")
+                log_event("AUDIO_ANALYSIS", task_type, f"  - Audio token range: {min(assistant_audio_tokens)} to {max(assistant_audio_tokens)}")
+                log_event("AUDIO_ANALYSIS", task_type, f"  - Audio token extraction time: {extract_time:.3f}s")
         else:
             # For TTS and ASR, use the original method (extract all audio tokens)
             extract_start_time = time.time()
@@ -505,7 +641,7 @@ class S2SInference:
                 if token_id >= self.audio_offset:
                     assistant_audio_tokens.append(token_id - self.audio_offset)
             extract_time = time.time() - extract_start_time
-            log_event("INFER", task_type, f"Extracted {len(assistant_audio_tokens)} audio tokens for decoding (standard method) in {extract_time:.3f}s")
+            log_event("INFER", task_type, f"Extracted {len(assistant_audio_tokens)} audio tokens for decoding (standard method) in {extract_time:.3f}s)")
 
         # Decode audio if we have tokens and audio tokenizer
         tts_speech = None
@@ -518,6 +654,15 @@ class S2SInference:
                 )
                 audio_decode_time = time.time() - audio_decode_start_time
                 log_event("INFER", task_type, f"Audio decoded successfully in {audio_decode_time:.3f}s! Shape: {tts_speech.shape if tts_speech is not None else 'None'}")
+                
+                # Log detailed audio decoding analysis
+                log_event("AUDIO_DECODING", task_type, f"Audio output generation breakdown:")
+                log_event("AUDIO_DECODING", task_type, f"  - Input audio tokens: {len(assistant_audio_tokens)}")
+                log_event("AUDIO_DECODING", task_type, f"  - Decoding time: {audio_decode_time:.3f}s")
+                log_event("AUDIO_DECODING", task_type, f"  - Output audio shape: {tts_speech.shape if tts_speech is not None else 'None'}")
+                if tts_speech is not None:
+                    log_event("AUDIO_DECODING", task_type, f"  - Output audio length: {tts_speech.shape[0] / 16000:.2f}s (at 16kHz)")
+                    log_event("AUDIO_DECODING", task_type, f"  - Audio generation rate: {len(assistant_audio_tokens) / (tts_speech.shape[0] / 16000):.1f} tokens/second")
             except Exception as e:
                 log_event("INFER", task_type, f"Audio decoding error: {e}")
                 import traceback
@@ -551,6 +696,24 @@ class S2SInference:
         
         log_event("TIMING", task_type, f"Total request time: {total_request_time:.3f}s")
         log_event("TIMING", task_type, f"Request completed at: {request_end_utc}")
+        
+        # Log comprehensive timing summary
+        log_event("TIMING_SUMMARY", task_type, f"=== COMPLETE TIMING BREAKDOWN ===")
+        log_event("TIMING_SUMMARY", task_type, f"Request start: {request_start_utc}")
+        log_event("TIMING_SUMMARY", task_type, f"Request end: {request_end_utc}")
+        log_event("TIMING_SUMMARY", task_type, f"Total request time: {total_request_time:.3f}s")
+        
+        if task_type == "Spoken QA" and audio_path:
+            log_event("TIMING_SUMMARY", task_type, f"=== SPOKEN QA AUDIO PROCESSING ===")
+            if 'first_text_token_time' in locals() and first_text_token_time is not None:
+                log_event("TIMING_SUMMARY", task_type, f"🎯 First text token '{first_text_token_text}' generated in: {first_text_token_time:.3f}s")
+            if 'first_audio_token_time' in locals() and first_audio_token_time is not None:
+                log_event("TIMING_SUMMARY", task_type, f"🎵 First audio token generated in: {first_audio_token_time:.3f}s")
+            if 'assistant_audio_tokens' in locals() and assistant_audio_tokens:
+                log_event("TIMING_SUMMARY", task_type, f"Assistant audio tokens: {len(assistant_audio_tokens)}")
+                log_event("TIMING_SUMMARY", task_type, f"Total generation time: {generation_time:.3f}s")
+        
+        log_event("TIMING_SUMMARY", task_type, f"=== END TIMING BREAKDOWN ===")
         
         return output, tts_speech
 
