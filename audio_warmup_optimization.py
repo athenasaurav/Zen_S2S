@@ -7,6 +7,11 @@ Multi-GPU VITA-Audio Implementation (Based on Working Code)
 Expected Performance:
 - Audio chunk time: 922ms → ~200ms (4-5x faster)
 - Parallel text and audio processing
+
+NEW FEATURE: First Complete Sentence Detection
+- Detects and logs when the first complete sentence is generated
+- Uses punctuation markers: . ! ? : , ; etc.
+- Tracks timing from generation start to first complete sentence
 """
 
 import math
@@ -51,6 +56,9 @@ except ImportError as e:
 
 PUNCTUATION = "!?.,;:~…@#$%^&*()_+-=[]{}|\\`\"'<>/\n\t "
 
+# Sentence-ending punctuation for first sentence detection
+SENTENCE_ENDINGS = ".!?:;…"
+
 def get_utc_timestamp():
     """Get current UTC timestamp in ISO format"""
     return datetime.now(timezone.utc).isoformat()
@@ -60,6 +68,59 @@ def log_event(event_type, task_type, message, **kwargs):
     timestamp = get_utc_timestamp()
     task_info = f"[{task_type}]" if task_type else ""
     print(f"{timestamp} {task_info} {event_type}: {message}")
+
+def detect_first_sentence_completion(accumulated_text, clean_text_only=True):
+    """
+    Detect if the accumulated text contains a complete sentence.
+    
+    Args:
+        accumulated_text (str): The accumulated text so far
+        clean_text_only (bool): If True, only consider clean text (no audio tokens)
+    
+    Returns:
+        tuple: (is_complete, sentence_text, remaining_text)
+    """
+    text_to_check = accumulated_text
+    
+    if clean_text_only:
+        # Remove audio tokens and system artifacts for sentence detection
+        text_to_check = re.sub(r'<\|audio_\d+\|>', '', text_to_check)
+        text_to_check = re.sub(r'<\|begin_of_audio\|>.*?<\|end_of_audio\|>', '', text_to_check, flags=re.DOTALL)
+        text_to_check = text_to_check.replace('<|audio|>', '')
+        
+        # Remove system artifacts
+        system_artifacts = [
+            "You are a helpful AI assistant.",
+            "You are a helpful AI assistant",
+            "Convert the speech to text.",
+            "Convert the text to speech.",
+            "<|im_start|>", "<|im_end|>",
+            "system", "user", "assistant"
+        ]
+        
+        for artifact in system_artifacts:
+            text_to_check = text_to_check.replace(artifact, "")
+        
+        # Clean up whitespace
+        text_to_check = re.sub(r'\s+', ' ', text_to_check).strip()
+    
+    # Skip if text is too short or empty
+    if len(text_to_check.strip()) < 3:
+        return False, "", text_to_check
+    
+    # Look for sentence endings
+    for i, char in enumerate(text_to_check):
+        if char in SENTENCE_ENDINGS:
+            # Found a sentence ending
+            sentence = text_to_check[:i+1].strip()
+            remaining = text_to_check[i+1:].strip()
+            
+            # Validate it's a meaningful sentence (not just punctuation)
+            sentence_words = re.findall(r'\b\w+\b', sentence)
+            if len(sentence_words) >= 2:  # At least 2 words for a meaningful sentence
+                return True, sentence, remaining
+    
+    return False, "", text_to_check
 
 @jit
 def wav_to_int16(audio: np.ndarray) -> np.ndarray:
@@ -405,100 +466,92 @@ class S2SInferenceMultiGPU:
     
     def _load_audio_components(self):
         """Load audio components on dedicated GPU"""
+        if not AUDIO_MODULES_AVAILABLE:
+            log_event("MULTI_GPU", "INIT", "⚠️ Audio modules not available, skipping audio component loading")
+            self.audio_tokenizer = None
+            return
+            
         log_event("MULTI_GPU", "INIT", f"Loading audio components on {self.audio_gpu}...")
         
-        # Set audio GPU
+        # Set device for audio loading
         torch.cuda.set_device(self.audio_gpu)
         
-        # Load audio tokenizer (using exact same approach as working code)
-        if AUDIO_MODULES_AVAILABLE:
-            try:
-                self.audio_tokenizer = get_audio_tokenizer(
-                    self.audio_tokenizer_path,
-                    self.audio_tokenizer_type,
-                    flow_path=self.flow_path,
-                    rank=self.audio_tokenizer_rank,
-                )
-                log_event("MULTI_GPU", "INIT", f"Audio tokenizer loaded on {self.audio_gpu}")
-                
-            except Exception as e:
-                log_event("MULTI_GPU", "INIT", f"Error loading audio tokenizer: {e}")
-                self.audio_tokenizer = None
-        else:
+        try:
+            # Load audio tokenizer on dedicated GPU
+            self.audio_tokenizer = get_audio_tokenizer(
+                self.audio_tokenizer_path,
+                self.audio_tokenizer_type,
+                flow_path=self.flow_path,
+                rank=self.audio_tokenizer_rank,
+            )
+            log_event("MULTI_GPU", "INIT", f"Audio tokenizer loaded on {self.audio_gpu}")
+            
+        except Exception as e:
+            log_event("MULTI_GPU", "INIT", f"Failed to load audio components: {e}")
             self.audio_tokenizer = None
     
     def _setup_multi_gpu_processing(self):
-        """Setup multi-GPU processing pipeline"""
+        """Setup multi-GPU processing components"""
         if self.audio_tokenizer:
-            # Initialize multi-GPU audio processor
+            # Initialize streaming audio processor
             self.streaming_processor = MultiGPUAudioProcessor(
                 self.audio_tokenizer, 
                 device=self.audio_gpu
             )
             
-            # Start background audio processing
+            # Start background worker
             self.streaming_processor.start_worker()
             
-            # 🔥 WARMUP OPTIMIZATION: Pre-warm audio decoder
+            # Perform warmup if enabled
             if self.enable_warmup:
                 self.streaming_processor.warmup_audio_decoder()
-            
-            # Audio processing state
-            self.pending_chunks = {}
-            self.completed_chunks = {}
-            self.chunk_counter = 0
-            
-            log_event("MULTI_GPU", "INIT", "Multi-GPU processing pipeline initialized")
+                
+            log_event("MULTI_GPU", "INIT", "Multi-GPU streaming processor initialized")
         else:
             self.streaming_processor = None
+            log_event("MULTI_GPU", "INIT", "No audio tokenizer available, streaming processor disabled")
     
     def configure_generation_mode(self):
         """Configure generation parameters based on mode"""
+        if self.use_turbo:
+            # Turbo mode: faster but potentially lower quality
+            self.model.generation_config.mtp_inference_mode = [1, 10]
+            log_event("MULTI_GPU", "CONFIG", "🚀 Turbo mode enabled: MTP [1,10]")
+        else:
+            # Boost mode: balanced performance and quality
+            self.model.generation_config.mtp_inference_mode = [1, 10, 4, 10]
+            log_event("MULTI_GPU", "CONFIG", "⚡ Boost mode enabled: MTP [1,10,4,10]")
         
-        # Base configuration
+        # Common generation settings
         self.model.generation_config.max_new_tokens = 8192
         self.model.generation_config.chat_format = "chatml"
-        self.model.generation_config.max_window_size = 8192
         self.model.generation_config.use_cache = True
         self.model.generation_config.do_sample = False
         self.model.generation_config.temperature = 1.0
         self.model.generation_config.top_k = 50
         self.model.generation_config.top_p = 1.0
         self.model.generation_config.num_beams = 1
-        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
-        
-        if self.use_turbo:
-            # TURBO MODE: [1, 10] for fastest generation (295 tokens/second)
-            self.model.generation_config.mtp_inference_mode = [1, 10]
-            log_event("MULTI_GPU", "INIT", "🚀 TURBO MODE enabled: [1, 10] - Expected ~295 tokens/second, ~3.4ms/token")
-        else:
-            # BOOST MODE: [1, 10, 4, 10] for balanced performance (170 tokens/second)
-            self.model.generation_config.mtp_inference_mode = [1, 10, 4, 10]
-            log_event("MULTI_GPU", "INIT", "⚡ BOOST MODE enabled: [1, 10, 4, 10] - Expected ~170 tokens/second, ~5.9ms/token")
-            
-        log_event("MULTI_GPU", "INIT", f"MTP inference mode: {self.model.generation_config.mtp_inference_mode}")
-        
-        if self.model.config.model_type == "hunyuan":
-            self.model.generation_config.eos_token_id = self.tokenizer.eos_token_id
     
-    def switch_mode(self, use_turbo):
-        """Switch between Turbo and Boost modes dynamically"""
-        self.use_turbo = use_turbo
-        self.configure_generation_mode()
+    def switch_mode(self, use_turbo: bool):
+        """Switch between Turbo and Boost modes"""
+        if self.use_turbo != use_turbo:
+            self.use_turbo = use_turbo
+            self.configure_generation_mode()
+            mode_name = "TURBO" if use_turbo else "BOOST"
+            log_event("MULTI_GPU", "CONFIG", f"Switched to {mode_name} mode")
     
-    def run_infer_streaming(self, audio_path=None, prompt_audio_path=None, message="", task_type="Spoken QA",
-                           stream_stride=4, max_returned_tokens=4096, sample_rate=16000):
-        """Multi-GPU streaming inference with real-time audio generation"""
+    def run_infer_streaming(self, audio_path=None, prompt_audio_path=None, message="", 
+                          task_type="Spoken QA", max_returned_tokens=4096, stream_stride=4):
+        """
+        Run streaming inference with multi-GPU optimization and first sentence detection
         
+        NEW FEATURE: Detects and logs when the first complete sentence is generated
+        """
         request_start_time = time.time()
-        
-        log_event("MULTI_GPU", task_type, f"🎬 Starting multi-GPU streaming inference")
-        log_event("MULTI_GPU", task_type, f"Text GPU: {self.text_gpu}, Audio GPU: {self.audio_gpu}")
+        log_event("MULTI_GPU", task_type, f"🚀 Starting multi-GPU streaming inference...")
         log_event("MULTI_GPU", task_type, f"Mode: {'TURBO' if self.use_turbo else 'BOOST'}")
-        log_event("MULTI_GPU", task_type, f"MTP config: {self.model.generation_config.mtp_inference_mode}")
-        log_event("MULTI_GPU", task_type, f"Audio decoder warmed up: {self.streaming_processor.is_warmed_up if self.streaming_processor else False}")
         
-        # Reset multi-GPU state
+        # Initialize streaming variables
         if self.streaming_processor:
             self.pending_chunks = {}
             self.completed_chunks = {}
@@ -620,12 +673,20 @@ class S2SInferenceMultiGPU:
         generated_text = ""
         current_audio_tokens = []
         
+        # Timing tracking variables
         first_token_time = None
         first_text_token_time = None
         first_audio_token_time = None
         first_audio_chunk_time = None
         
+        # NEW: First sentence detection variables
+        first_sentence_time = None
+        first_sentence_text = ""
+        accumulated_text_for_sentence = ""
+        sentence_detected = False
+        
         log_event("MULTI_GPU", task_type, "🎯 Starting real-time token processing...")
+        log_event("SENTENCE_DETECT", task_type, "📝 Starting first sentence detection...")
         
         for new_text in streamer:
             current_time = time.time()
@@ -640,6 +701,25 @@ class S2SInferenceMultiGPU:
             if new_text.strip() and first_text_token_time is None:
                 first_text_token_time = token_latency
                 log_event("MULTI_GPU", task_type, f"📝 FIRST TEXT TOKEN at {first_text_token_time:.3f}s: '{new_text.strip()}'")
+            
+            # NEW: Accumulate text for sentence detection
+            accumulated_text_for_sentence += new_text
+            
+            # NEW: Check for first complete sentence
+            if not sentence_detected:
+                is_complete, sentence_text, remaining_text = detect_first_sentence_completion(
+                    accumulated_text_for_sentence, clean_text_only=True
+                )
+                
+                if is_complete and sentence_text:
+                    first_sentence_time = token_latency
+                    first_sentence_text = sentence_text
+                    sentence_detected = True
+                    
+                    log_event("SENTENCE_DETECT", task_type, f"🎉 FIRST COMPLETE SENTENCE at {first_sentence_time:.3f}s")
+                    log_event("SENTENCE_DETECT", task_type, f"📝 Sentence: '{first_sentence_text}'")
+                    log_event("SENTENCE_DETECT", task_type, f"📊 Sentence length: {len(first_sentence_text)} characters")
+                    log_event("SENTENCE_DETECT", task_type, f"📊 Word count: {len(first_sentence_text.split())}")
             
             # Extract audio tokens
             audio_tokens_in_text = re.findall(r'<\|audio_(\d+)\|>', new_text)
@@ -717,6 +797,20 @@ class S2SInferenceMultiGPU:
             log_event("MULTI_GPU", task_type, f"🎵 First audio token latency: {first_audio_token_time:.3f}s")
         if first_audio_chunk_time:
             log_event("MULTI_GPU", task_type, f"🎵 First audio chunk latency: {first_audio_chunk_time:.3f}s ⚡ (multi-GPU optimized!)")
+        
+        # NEW: Log first sentence detection results
+        if first_sentence_time:
+            log_event("SENTENCE_DETECT", task_type, "=== FIRST SENTENCE DETECTION RESULTS ===")
+            log_event("SENTENCE_DETECT", task_type, f"🎉 First sentence latency: {first_sentence_time:.3f}s")
+            log_event("SENTENCE_DETECT", task_type, f"📝 First sentence: '{first_sentence_text}'")
+            log_event("SENTENCE_DETECT", task_type, f"📊 Sentence characteristics:")
+            log_event("SENTENCE_DETECT", task_type, f"   - Length: {len(first_sentence_text)} characters")
+            log_event("SENTENCE_DETECT", task_type, f"   - Words: {len(first_sentence_text.split())}")
+            log_event("SENTENCE_DETECT", task_type, f"   - Ending: '{first_sentence_text[-1] if first_sentence_text else 'N/A'}'")
+            log_event("SENTENCE_DETECT", task_type, "=== END SENTENCE DETECTION ===")
+        else:
+            log_event("SENTENCE_DETECT", task_type, "⚠️ No complete sentence detected during generation")
+        
         log_event("MULTI_GPU", task_type, f"🎵 Audio chunks generated: {len(self.completed_chunks)}")
         log_event("MULTI_GPU", task_type, f"Total request time: {total_time:.3f}s")
         log_event("MULTI_GPU", task_type, f"Generation time: {generation_time:.3f}s")
@@ -790,8 +884,8 @@ def create_gradio_interface():
     
     def chat_interface(audio_input, task_selector, use_turbo_mode, history):
         """Main chat interface function"""
-        if audio_input is None:
-            return history, ""
+        if audio_input is None or audio_input == "":
+            return history, None
         
         # Switch mode if needed
         s2s_engine.switch_mode(use_turbo_mode)
@@ -809,18 +903,19 @@ def create_gradio_interface():
             # Update chat history
             history.append([f"[Audio Input] {os.path.basename(audio_input)}", response])
             
-            return history, ""
+            return history, None
             
         except Exception as e:
             error_msg = f"Multi-GPU processing error: {e}"
             log_event("MULTI_GPU", task_selector, error_msg)
             history.append([f"[Audio Input] {os.path.basename(audio_input)}", error_msg])
-            return history, ""
+            return history, None
     
     # Create Gradio interface
     with gr.Blocks(title="Multi-GPU VITA-Audio", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🚀 Multi-GPU VITA-Audio (4x H100 Optimized)")
         gr.Markdown("**Text Generation: GPU:0 | Audio Processing: GPU:1 | Expected 4-5x faster audio chunks**")
+        gr.Markdown("**NEW: 📝 First Complete Sentence Detection & Logging**")
         
         with gr.Row():
             with gr.Column(scale=2):
@@ -865,6 +960,12 @@ def create_gradio_interface():
         - **Expected**: 4-5x faster audio chunk generation (~200ms vs 900ms)
         - **Warmup**: Pre-warmed audio decoder using assets folder
         - **Parallel processing**: Text and audio generation simultaneously
+        
+        ### 📝 NEW: First Sentence Detection:
+        - **Real-time detection**: Identifies complete sentences as they're generated
+        - **Punctuation-based**: Uses . ! ? : ; etc. to detect sentence endings
+        - **Timing logs**: Records exact time when first sentence is completed
+        - **Detailed metrics**: Logs sentence length, word count, and characteristics
         """)
         
         # Event handlers
@@ -875,18 +976,23 @@ def create_gradio_interface():
         )
         
         clear_btn.click(
-            lambda: ([], None),
-            outputs=[chatbot, audio_input]
+            lambda: [],
+            outputs=[chatbot]
         )
     
     return demo
 
 if __name__ == "__main__":
+    log_event("MULTI_GPU", "MAIN", "🚀 Starting Multi-GPU VITA-Audio with First Sentence Detection...")
+    
     # Create and launch interface
     demo = create_gradio_interface()
+    
+    # Launch with multi-GPU configuration
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=True,
+        debug=True,
         show_error=True
     )
