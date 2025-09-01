@@ -9,7 +9,7 @@ Features:
 - Detailed token-level logging
 - Zen Decoder integration for real-time audio token decoding
 - Parallel sentence-by-sentence audio generation
-- Server-based timing measurements
+- Server-based timing measurements (T=0 = server start)
 """
 
 import math
@@ -166,7 +166,7 @@ class ZenDecoderProcessor:
     
     def __init__(self, voice_id="bRfSN6IjvoNM52ilGATs"):
         # Zen Decoder API key - kept in code as requested
-        self.api_key = "YOUR_ZEN_DECODER_API_KEY"
+        self.api_key = "Your Zen Decoder API key"
         self.voice_id = voice_id
         self.client = None
         self.audio_files = []
@@ -177,6 +177,7 @@ class ZenDecoderProcessor:
         self.current_sentence_buffer = ""
         self.first_audio_chunk_time = None
         self.generation_start_time = None
+        self.server_start_time = None  # T=0 reference
         
         # Initialize Zen Decoder client
         if ZEN_DECODER_AVAILABLE and self.api_key:
@@ -196,6 +197,10 @@ class ZenDecoderProcessor:
     def set_generation_start_time(self, start_time):
         """Set the generation start time for timing measurements"""
         self.generation_start_time = start_time
+        
+    def set_server_start_time(self, start_time):
+        """Set the server start time as T=0 reference"""
+        self.server_start_time = start_time
     
     def start_processing(self):
         """Start background audio token decoding processing thread"""
@@ -273,11 +278,13 @@ class ZenDecoderProcessor:
             
             for chunk in audio_stream:
                 if chunk:  # Only process non-empty chunks
-                    if not first_chunk_received and self.first_audio_chunk_time is None and self.generation_start_time:
+                    if not first_chunk_received and self.first_audio_chunk_time is None:
                         self.first_audio_chunk_time = time.time()
-                        first_chunk_latency = self.first_audio_chunk_time - self.generation_start_time
-                        log_event("ZEN_DECODER_FIRST_CHUNK", "PROCESSING", 
-                                  f"🎵 FIRST ZEN DECODER AUDIO CHUNK STREAMED at {first_chunk_latency:.3f}s")
+                        # FIXED: Use server_start_time for cumulative timing
+                        if self.server_start_time:
+                            first_chunk_latency = self.first_audio_chunk_time - self.server_start_time
+                            log_event("ZEN_DECODER_FIRST_CHUNK", "PROCESSING", 
+                                      f"🎵 FIRST ZEN DECODER AUDIO CHUNK STREAMED at {first_chunk_latency:.3f}s from server start")
                         first_chunk_received = True
                     
                     audio_chunks.append(chunk)
@@ -395,193 +402,172 @@ class ZenDecoderProcessor:
         return self.audio_files
     
     def shutdown(self):
-        """Shutdown Zen Decoder processor"""
+        """Shutdown the processor"""
         self.is_running = False
-        self.text_queue.put(None)  # Shutdown signal
         if self.processing_thread:
-            self.processing_thread.join(timeout=3.0)
+            # Send shutdown signal
+            self.text_queue.put(None)
+            self.processing_thread.join(timeout=2.0)
+        log_event("ZEN_DECODER", "MAIN", "🎵 Zen Decoder processor shutdown")
 
 class TokenStreamAnalyzer:
     """Analyze token stream with detailed timing and Zen Decoder integration"""
     
     def __init__(self):
         self.reset()
-    
+        
     def reset(self):
-        """Reset analyzer state"""
+        """Reset all tracking variables"""
         self.accumulated_text = ""
         self.accumulated_clean_text = ""
         self.text_tokens = []
         self.audio_tokens = []
-        
-        # Timing tracking
         self.first_token_time = None
         self.first_text_token_time = None
         self.first_audio_token_time = None
         self.first_sentence_time = None
-        self.first_sentence_text = ""
+        self.first_sentence_text = None
         self.sentence_detected = False
-        
-        # Audio token tracking
-        self.has_real_audio_tokens = False  # Track if model produced any real audio tokens
-        self.dummy_audio_token_offset = 0.003  # 3-4ms offset for dummy tokens
-        
-        self.generation_start_time = None
-        
-        # Reset Zen Decoder
-        if hasattr(self, 'zen_decoder'):
-            self.zen_decoder.shutdown()
+        self.has_real_audio_tokens = False
         self.zen_decoder = ZenDecoderProcessor()
-    
-    def set_generation_start_time(self, start_time):
-        """Set the generation start time"""
-        self.generation_start_time = start_time
-        self.zen_decoder.set_generation_start_time(start_time)
-        self.zen_decoder.start_processing()
-    
-    def process_token_chunk(self, new_text, task_type="Spoken QA"):
-        """Process a new token chunk from the stream with Zen Decoder integration"""
-        current_time = time.time()
-        token_latency = current_time - self.generation_start_time if self.generation_start_time else 0
+        self.server_start_time = None  # T=0 reference
+        self.audio_encoding_time = 0
         
-        # Track first token
-        if self.first_token_time is None and new_text.strip():
+    def set_server_start_time(self, start_time):
+        """Set the server start time as T=0 reference"""
+        self.server_start_time = start_time
+        self.zen_decoder.set_server_start_time(start_time)
+        
+    def set_audio_encoding_time(self, encoding_time):
+        """Set the audio encoding time"""
+        self.audio_encoding_time = encoding_time
+        
+    def process_token_chunk(self, new_text, task_type, current_time):
+        """Process each token chunk with timing from server start"""
+        # FIXED: Calculate cumulative time from server start (T=0)
+        if self.server_start_time:
+            token_latency = current_time - self.server_start_time
+        else:
+            token_latency = 0
+        
+        # Track first token timing
+        if self.first_token_time is None:
             self.first_token_time = token_latency
-            log_event("TOKEN", task_type, f"🎯 FIRST TOKEN at {self.first_token_time:.3f}s: '{new_text[:50]}...'")
+            log_event("TOKEN_FIRST", task_type, f"🎯 FIRST TOKEN at {token_latency:.3f}s from server start")
         
-        # Extract clean text from this chunk
+        # Extract clean text and audio tokens
         clean_text_chunk = extract_clean_text_only(new_text)
-        
-        # Extract audio tokens from this chunk
         audio_tokens_chunk = extract_audio_tokens_from_chunk(new_text)
-        
-        # Check if we have real audio tokens
-        if audio_tokens_chunk:
-            self.has_real_audio_tokens = True
         
         # Track first text token
         if clean_text_chunk.strip() and self.first_text_token_time is None:
             self.first_text_token_time = token_latency
-            log_event("TOKEN", task_type, f"📝 FIRST TEXT TOKEN at {self.first_text_token_time:.3f}s: '{clean_text_chunk.strip()}'")
+            log_event("TOKEN_TEXT_FIRST", task_type, f"📝 FIRST TEXT TOKEN at {token_latency:.3f}s from server start")
         
-        # Track first audio token (only if real audio tokens exist)
+        # Track first audio token
         if audio_tokens_chunk and self.first_audio_token_time is None:
             self.first_audio_token_time = token_latency
-            log_event("TOKEN", task_type, f"🎵 FIRST AUDIO TOKEN at {self.first_audio_token_time:.3f}s: {audio_tokens_chunk[0]}")
+            self.has_real_audio_tokens = True
+            log_event("TOKEN_AUDIO_FIRST", task_type, f"🎵 FIRST AUDIO TOKEN at {token_latency:.3f}s from server start")
+        
+        # Store tokens with timing
+        if clean_text_chunk.strip():
+            self.text_tokens.append({
+                'timestamp': token_latency,
+                'text': clean_text_chunk.strip()
+            })
+        
+        if audio_tokens_chunk:
+            for token_id in audio_tokens_chunk:
+                self.audio_tokens.append({
+                    'timestamp': token_latency,
+                    'token': token_id
+                })
         
         # Accumulate text with proper spacing
-        self.accumulated_text += new_text
-        
-        # For clean text accumulation, add space between chunks if both have content
         if clean_text_chunk.strip():
             if self.accumulated_clean_text and not self.accumulated_clean_text.endswith(' '):
                 self.accumulated_clean_text += ' '
             self.accumulated_clean_text += clean_text_chunk.strip()
-            
-            # Send text token to Zen Decoder IMMEDIATELY
-            self.zen_decoder.add_text_token(clean_text_chunk.strip(), task_type)
         
-        # Store tokens
-        if clean_text_chunk.strip():
-            self.text_tokens.append({
-                'text': clean_text_chunk,
-                'timestamp': token_latency,
-                'time': current_time
-            })
-        
-        if audio_tokens_chunk:
-            for token in audio_tokens_chunk:
-                self.audio_tokens.append({
-                    'token': token,
-                    'timestamp': token_latency,
-                    'time': current_time,
-                    'is_dummy': False  # These are real tokens
-                })
-        
-        # Check for first complete sentence (only on clean text)
-        if not self.sentence_detected and self.accumulated_clean_text.strip():
+        # Check for first sentence completion
+        if not self.sentence_detected:
             is_complete, sentence_text, remaining_text = detect_sentence_completion(self.accumulated_clean_text)
-            
             if is_complete and sentence_text:
                 self.first_sentence_time = token_latency
                 self.first_sentence_text = sentence_text
                 self.sentence_detected = True
-                
-                log_event("SENTENCE", task_type, f"🎉 FIRST COMPLETE SENTENCE at {self.first_sentence_time:.3f}s")
-                log_event("SENTENCE", task_type, f"📝 Sentence: '{self.first_sentence_text}'")
-                log_event("SENTENCE", task_type, f"📊 Length: {len(self.first_sentence_text)} chars, Words: {len(self.first_sentence_text.split())}")
+                log_event("SENTENCE_FIRST", task_type, f"🎉 FIRST SENTENCE COMPLETED at {token_latency:.3f}s from server start")
+                log_event("SENTENCE_FIRST", task_type, f"📝 First sentence: '{sentence_text}'")
         
-        # Log token details
-        if clean_text_chunk.strip() or audio_tokens_chunk:
-            log_event("TOKEN_DETAIL", task_type, 
-                     f"t={token_latency:.3f}s | Text: '{clean_text_chunk}' | Audio: {audio_tokens_chunk}")
+        # Send clean text to Zen Decoder for immediate processing
+        if clean_text_chunk.strip():
+            self.zen_decoder.add_text_token(clean_text_chunk, task_type)
+        
+        # Log detailed token information
+        log_event("TOKEN_DETAIL", task_type, 
+                 f"t={token_latency:.3f}s | Text: '{clean_text_chunk}' | Audio: {audio_tokens_chunk}")
+        
+        self.accumulated_text += new_text
         
         return {
-            'accumulated_text': self.accumulated_text,
-            'accumulated_clean_text': self.accumulated_clean_text,
-            'text_tokens': len(self.text_tokens),
-            'audio_tokens': len(self.audio_tokens),
-            'sentence_detected': self.sentence_detected,
-            'first_sentence': self.first_sentence_text if self.sentence_detected else None,
-            'latest_audio_file': self.zen_decoder.get_latest_audio_file()
+            'timestamp': token_latency,
+            'clean_text': clean_text_chunk,
+            'audio_tokens': audio_tokens_chunk,
+            'accumulated_clean_text': self.accumulated_clean_text
         }
     
     def finalize_analysis(self):
-        """Finalize analysis and Zen Decoder processing"""
-        # If no real audio tokens were generated during the entire process, generate dummy ones
+        """Finalize analysis and generate dummy tokens if needed"""
+        # Generate dummy audio tokens if no real tokens were found
         if not self.has_real_audio_tokens and self.text_tokens:
             log_event("DUMMY_TOKENS", "PROCESSING", "🎲 No audio tokens detected from model - generating dummy tokens")
             
-            # Generate dummy audio tokens based on text tokens
             for i, text_token in enumerate(self.text_tokens):
-                # Generate 1-3 dummy audio tokens per text token
-                num_dummy = random.randint(1, 3)
-                base_timestamp = text_token['timestamp']
+                # Generate dummy tokens for this text token
+                dummy_tokens = generate_dummy_audio_tokens(len(text_token['text']), text_token['timestamp'])
                 
-                for j in range(num_dummy):
-                    dummy_token_id = random.randint(100, 99999)  # 3-5 digits
-                    dummy_timestamp = base_timestamp + (j * random.uniform(0.001, 0.003))
+                for j, dummy_token_id in enumerate(dummy_tokens):
+                    # Add small random offset (3-4ms) to dummy token timing
+                    dummy_timestamp = text_token['timestamp'] + random.uniform(0.003, 0.004)
                     
                     self.audio_tokens.append({
-                        'token': dummy_token_id,
                         'timestamp': dummy_timestamp,
-                        'time': text_token['time'],
-                        'is_dummy': True
+                        'token': dummy_token_id
                     })
-            
-            # Set first audio token time if we have dummy tokens
-            if self.audio_tokens and self.first_audio_token_time is None:
-                first_dummy = min(self.audio_tokens, key=lambda x: x['timestamp'])
-                self.first_audio_token_time = self.first_text_token_time + random.uniform(0.003, 0.004) if self.first_text_token_time else first_dummy['timestamp']
-                log_event("TOKEN", "PROCESSING", f"🎵 FIRST AUDIO TOKEN (dummy) at {self.first_audio_token_time:.3f}s: {first_dummy['token']}")
+                    
+                    # Set first audio token time if not set
+                    if self.first_audio_token_time is None:
+                        self.first_audio_token_time = dummy_timestamp
+                        log_event("TOKEN_AUDIO_FIRST", "PROCESSING", 
+                                  f"🎵 FIRST AUDIO TOKEN (dummy) at {dummy_timestamp:.3f}s from server start")
         
         # Finalize Zen Decoder processing
         self.zen_decoder.finalize_processing()
-    
-    def get_summary(self, task_type="Spoken QA"):
-        """Get timing summary including Zen Decoder timing"""
-        log_event("SUMMARY", task_type, "=== TOKEN STREAM ANALYSIS SUMMARY ===")
-        if self.first_token_time:
-            log_event("SUMMARY", task_type, f"🎯 First token: {self.first_token_time:.3f}s")
-        if self.first_text_token_time:
-            log_event("SUMMARY", task_type, f"📝 First text token: {self.first_text_token_time:.3f}s")
-        if self.first_audio_token_time:
-            log_event("SUMMARY", task_type, f"🎵 First audio token: {self.first_audio_token_time:.3f}s")
-        if self.first_sentence_time:
-            log_event("SUMMARY", task_type, f"🎉 First sentence: {self.first_sentence_time:.3f}s")
-            log_event("SUMMARY", task_type, f"📝 Sentence: '{self.first_sentence_text}'")
-        else:
-            log_event("SUMMARY", task_type, "⚠️ No complete sentence detected")
         
-        if self.zen_decoder.first_audio_chunk_time and self.generation_start_time:
-            first_zen_chunk_latency = self.zen_decoder.first_audio_chunk_time - self.generation_start_time
-            log_event("SUMMARY", task_type, f"🎵 First Zen Decoder audio chunk: {first_zen_chunk_latency:.3f}s")
-        
-        log_event("SUMMARY", task_type, f"📊 Total text tokens: {len(self.text_tokens)}")
-        log_event("SUMMARY", task_type, f"📊 Total audio tokens: {len(self.audio_tokens)}")
-        log_event("SUMMARY", task_type, f"📊 Zen Decoder sentences: {self.zen_decoder.sentence_counter}")
-        log_event("SUMMARY", task_type, f"📊 Clean text length: {len(self.accumulated_clean_text)} chars")
-        log_event("SUMMARY", task_type, "=== END SUMMARY ===")
+        # Log summary
+        log_event("SUMMARY", "PROCESSING", "=== ANALYSIS SUMMARY ===")
+        log_event("SUMMARY", "PROCESSING", f"📊 Total text tokens: {len(self.text_tokens)}")
+        log_event("SUMMARY", "PROCESSING", f"📊 Total audio tokens: {len(self.audio_tokens)}")
+        log_event("SUMMARY", "PROCESSING", f"📊 Zen Decoder sentences: {self.zen_decoder.sentence_counter}")
+        log_event("SUMMARY", "PROCESSING", f"📊 Clean text length: {len(self.accumulated_clean_text)} chars")
+        log_event("SUMMARY", "PROCESSING", "=== END SUMMARY ===")
+
+    def get_summary(self, task_type):
+        """Get timing summary"""
+        return {
+            'first_token_time': self.first_token_time,
+            'first_text_token_time': self.first_text_token_time,
+            'first_audio_token_time': self.first_audio_token_time,
+            'first_sentence_time': self.first_sentence_time,
+            'first_sentence_text': self.first_sentence_text,
+            'first_zen_chunk_time': (self.zen_decoder.first_audio_chunk_time - self.server_start_time) if self.zen_decoder.first_audio_chunk_time and self.server_start_time else None,
+            'audio_encoding_time': self.audio_encoding_time,
+            'total_text_tokens': len(self.text_tokens),
+            'total_audio_tokens': len(self.audio_tokens),
+            'zen_sentences': self.zen_decoder.sentence_counter,
+            'total_time': time.time() - self.server_start_time if self.server_start_time else 0
+        }
 
 class S2SInferenceTokenFocused:
     """Simplified VITA-Audio inference focused on token analysis with Zen Decoder"""
@@ -639,6 +625,7 @@ class S2SInferenceTokenFocused:
             return
             
         try:
+            # FIXED: Remove device parameter that was causing error
             self.audio_tokenizer = get_audio_tokenizer(
                 self.audio_tokenizer_path,
                 self.audio_tokenizer_type,
@@ -673,11 +660,16 @@ class S2SInferenceTokenFocused:
         """
         Run inference with detailed token-level analysis and Zen Decoder integration
         """
-        request_start_time = time.time()
+        # T=0 is when request hits the server
+        server_start_time = time.time()
         log_event("REQUEST", task_type, f"🚀 Starting token-focused inference with Zen Decoder...")
         
-        # Reset analyzer
+        # Reset analyzer and set server start time as T=0 reference
         self.token_analyzer.reset()
+        self.token_analyzer.set_server_start_time(server_start_time)
+        
+        # Start Zen Decoder processing thread
+        self.token_analyzer.zen_decoder.start_processing()
         
         # Prepare messages
         if task_type == "TTS":
@@ -718,11 +710,17 @@ class S2SInferenceTokenFocused:
                     # Measure ONLY the actual encoding step
                     audio_encoding_start = time.time()
                     audio_tokens = self.audio_tokenizer.encode(audio_path)
-                    audio_encoding_time = time.time() - audio_encoding_start
+                    audio_encoding_end = time.time()
+                    audio_encoding_time = audio_encoding_end - audio_encoding_start
+                    
+                    # Store audio encoding time in analyzer
+                    self.token_analyzer.set_audio_encoding_time(audio_encoding_time)
                     
                     audio_tokens_str = "".join([f"<|audio_{i}|>" for i in audio_tokens])
                     
-                    log_event("AUDIO_ENCODING", task_type, f"🎧 Encoded {len(audio_tokens)} audio tokens in {audio_encoding_time*1000:.1f}ms")
+                    # Log with cumulative time from server start
+                    cumulative_encoding_time = audio_encoding_end - server_start_time
+                    log_event("AUDIO_ENCODING", task_type, f"🎧 Encoded {len(audio_tokens)} audio tokens in {audio_encoding_time*1000:.1f}ms (cumulative: {cumulative_encoding_time:.3f}s)")
                     
                     # Replace <|audio|> with actual tokens
                     input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
@@ -752,22 +750,24 @@ class S2SInferenceTokenFocused:
             "num_logits_to_keep": 1,
         }
 
-        # Start generation
+        # Start generation (but don't reset timer - keep server_start_time as T=0)
         generation_start_time = time.time()
-        self.token_analyzer.set_generation_start_time(generation_start_time)
+        generation_start_cumulative = generation_start_time - server_start_time
+        
+        log_event("GENERATION", task_type, f"🎯 Starting token stream processing at {generation_start_cumulative:.3f}s from server start...")
         
         generation_thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
         generation_thread.start()
         
-        log_event("GENERATION", task_type, "🎯 Starting token stream processing with Zen Decoder...")
-        
-        # Process token stream
+        # Process token stream (all timing relative to server_start_time)
         stream_results = []
         for new_text in streamer:
-            result = self.token_analyzer.process_token_chunk(new_text, task_type)
+            current_time = time.time()
+            
+            result = self.token_analyzer.process_token_chunk(new_text, task_type, current_time)
             stream_results.append({
                 'new_text': new_text,
-                'timestamp': time.time() - generation_start_time,
+                'timestamp': result['timestamp'],  # Already cumulative from server start
                 'result': result
             })
         
@@ -778,9 +778,9 @@ class S2SInferenceTokenFocused:
         self.token_analyzer.finalize_analysis()
         
         # Get final summary
-        self.token_analyzer.get_summary(task_type)
+        summary = self.token_analyzer.get_summary(task_type)
         
-        total_time = time.time() - request_start_time
+        total_time = time.time() - server_start_time  # Total time from server start
         log_event("REQUEST", task_type, f"Total request time: {total_time:.3f}s")
         
         return {
@@ -789,19 +789,7 @@ class S2SInferenceTokenFocused:
             'zen_decoder_files': self.token_analyzer.zen_decoder.get_all_audio_files(),
             'latest_audio_file': self.token_analyzer.zen_decoder.get_latest_audio_file(),
             'complete_audio_file': self.token_analyzer.zen_decoder.get_complete_audio_file(),
-            'summary': {
-                'first_token_time': self.token_analyzer.first_token_time,
-                'first_text_token_time': self.token_analyzer.first_text_token_time,
-                'first_audio_token_time': self.token_analyzer.first_audio_token_time,
-                'first_sentence_time': self.token_analyzer.first_sentence_time,
-                'first_sentence_text': self.token_analyzer.first_sentence_text,
-                'first_zen_chunk_time': (self.token_analyzer.zen_decoder.first_audio_chunk_time - generation_start_time) if self.token_analyzer.zen_decoder.first_audio_chunk_time else None,
-                'audio_encoding_time': audio_encoding_time,
-                'total_text_tokens': len(self.token_analyzer.text_tokens),
-                'total_audio_tokens': len(self.token_analyzer.audio_tokens),
-                'zen_sentences': self.token_analyzer.zen_decoder.sentence_counter,
-                'total_time': total_time
-            }
+            'summary': summary
         }
 
 def create_token_analysis_interface():
@@ -821,23 +809,17 @@ def create_token_analysis_interface():
     
     log_event("MAIN", "INIT", "✅ Engine initialized!")
     
-    def analyze_tokens(audio_input, task_selector, text_input):
-        """Analyze token generation with Zen Decoder"""
-        if audio_input is None and not text_input.strip():
-            return "Please provide audio input or text input", "", "", "", "", None
+    def analyze_tokens(audio_input, task_selector):
+        """Analyze token generation with Zen Decoder (audio-only UI)"""
+        if not audio_input:
+            return "Please provide an audio file (WAV).", "", "", "", "", None
         
         try:
-            # Run analysis
-            if audio_input:
-                result = s2s_engine.run_token_analysis_with_zen_decoder(
-                    audio_path=audio_input,
-                    task_type=task_selector
-                )
-            else:
-                result = s2s_engine.run_token_analysis_with_zen_decoder(
-                    message=text_input,
-                    task_type=task_selector
-                )
+            # Always run with audio now (both Spoken QA and ASR consume audio)
+            result = s2s_engine.run_token_analysis_with_zen_decoder(
+                audio_path=audio_input,
+                task_type=task_selector
+            )
             
             # Format results for display
             final_text = result['final_text']
@@ -894,10 +876,10 @@ def create_token_analysis_interface():
             audio_encoding_time = f"{summary['audio_encoding_time']*1000:.1f}ms" if summary['audio_encoding_time'] > 0 else 'N/A'
             
             timing_summary = f"""=== TIMING SUMMARY ===
+🎧 Audio Encoding Time: {audio_encoding_time}
 🎯 First Token: {summary['first_token_time']:.3f}s
 📝 First Text Token: {first_text_time}
 🎵 First Audio Token: {first_audio_time}
-🎧 Audio Encoding Time: {audio_encoding_time}
 🎉 First Sentence: {first_sentence_time}
 🎵 First Zen Decoder Chunk: {first_zen_chunk_time}
 
@@ -934,13 +916,10 @@ Total Time: {summary['total_time']:.3f}s
                     format="wav"
                 )
                 
-                text_input = gr.Textbox(
-                    label="Text Input (for TTS)",
-                    placeholder="Enter text for TTS..."
-                )
+                # text_input was removed as requested
                 
                 task_selector = gr.Dropdown(
-                    choices=["Spoken QA", "ASR", "TTS"],
+                    choices=["Spoken QA", "ASR"],
                     value="Spoken QA",
                     label="Task Type"
                 )
@@ -978,7 +957,7 @@ Total Time: {summary['total_time']:.3f}s
                 lines=15
             )
         
-        # NEW: Audio output section at the bottom (as requested)
+        # Audio output section at the bottom (as requested)
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 🎵 Zen Decoder Audio Output")
@@ -990,7 +969,7 @@ Total Time: {summary['total_time']:.3f}s
         # Event handler
         analyze_btn.click(
             analyze_tokens,
-            inputs=[audio_input, task_selector, text_input],
+            inputs=[audio_input, task_selector],
             outputs=[final_text, text_tokens, audio_tokens, token_stream, timing_summary, zen_audio_output]
         )
     
