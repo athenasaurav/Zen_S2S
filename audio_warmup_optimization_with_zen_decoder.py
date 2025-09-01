@@ -140,8 +140,8 @@ class ZenDecoderProcessor:
     """Zen Decoder (Audio Token Decoder) processor for real-time audio generation with streaming"""
     
     def __init__(self, voice_id="bRfSN6IjvoNM52ilGATs"):
-        # Zen Decoder API key - kept in code as requested
-        self.api_key = "sk_4f913f5a40ee5466e6841a44028c5ff01da980af88f0b51f"
+        # Zen Decoder  key - kept in code as requested
+        self._key = "Your_Zen_Deocder_API_Key"
         self.voice_id = voice_id
         self.client = None
         self.audio_files = []
@@ -928,3 +928,4 @@ if __name__ == "__main__":
         debug=True,
         show_error=True
     )
+
