@@ -1,0 +1,14 @@
+transformers>=4.43
+accelerate>=0.31
+sentencepiece
+gradio>=5.40
+huggingface_hub>=0.33
+torch==2.8.0
+torchaudio==2.8.0
+soundfile
+numpy
+einops
+loguru
+funasr>=1.2.6
+modelscope>=1.17.0
+elevenlabs
